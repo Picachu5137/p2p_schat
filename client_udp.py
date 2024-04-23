@@ -1,13 +1,22 @@
 import socket
 import ssl
-import vp
 import random
+import vp
+import pickle
+from typing import NamedTuple
+
+
+class Packet(NamedTuple):
+    packet_type: str
+    payload: str
+    port: int
 
 
 class Client:
-    TCP_MAX_SIZE = 4096
+    # maximum udp packet size without data loss = 576
+    UDP_MAX_SIZE = 4096
 
-    def __init__(self, ip: str = socket.gethostbyname(socket.gethostname()), port: int = 2424, *args, **kwargs):
+    def __init__(self, ip: str = socket.gethostbyname(socket.gethostname()), port: int = 2424):
         self.private_key, self.public_key = vp.generate_keys()
 
         self.sock_l_port = port
@@ -19,57 +28,114 @@ class Client:
 
         self._connected_addresses = []
 
-    def listen(self, *args, **kwargs):
-        encrypted_msg, addr = self.sock_l.recvfrom(Client.TCP_MAX_SIZE)
+    def listen(self) -> tuple[str, tuple[str, int]] | None:
+        encoded_data, addr = self.sock_l.recvfrom(Client.UDP_MAX_SIZE)
+        decoded_data: Packet = pickle.loads(encoded_data)
+        # addr = (ip, port)
+        addr = (addr[0], decoded_data.port)
 
-        if any([addr[0] in peer for peer in self._connected_addresses]):
-            if encrypted_msg:
-                encrypted_msg = encrypted_msg.decode("utf-8")
-                msg = vp.decrypt(encrypted_msg)
-                return msg, addr[0]
+        # decoded_data = (packet_type: str, data: , port: int)
+        if any(addr[0] == peer[0] and addr[1] == peer[1] for peer in self._connected_addresses):
+            # TODO: сделать обработку пакетов ["MESSAGE", msg, port]
 
-        else:
-            print(f"denied connection from {addr[0]}:{addr[1]}")
-        return None, addr[0]
+            # message processing
+            # decoded_data = ["MESSAGE", encrypted_msg, port: int]
+            if decoded_data.packet_type == "MESSAGE":
+                encrypted_msg = decoded_data.payload
+                decrypted_msg = vp.decrypt(encrypted_msg)
+                return decrypted_msg, addr
 
-    def connect(self, host: str = "127.0.0.1", port: int = 2424, *args, **kwargs):
+            # TODO: сделать механизм подключения и обмена ключами,
+            #  только надо придумать протокол шифрования и подключения двух узлов
+            # processing peer connection
+            if decoded_data[0] == "CONNECTION":
+                pass
+
+    def package_process(self, encoded_data: bytes | bytearray, addr: tuple[str, int]):
+        decoded_data: Packet = pickle.loads(encoded_data)
+        addr = (addr[0], decoded_data.port)
+
+        if any(addr[0] == peer[0] and addr[1] == peer[1] for peer in self._connected_addresses):
+            if decoded_data.packet_type == "MESSAGE":
+                encrypted_msg = decoded_data.payload
+                decrypted_msg = vp.decrypt(encrypted_msg)
+                return decrypted_msg, addr
+
+            # TODO: сделать механизм подключения и обмена ключами,
+            #  только надо придумать протокол шифрования и подключения двух узлов
+            # processing peer connection
+            if decoded_data[0] == "CONNECTION":
+                pass
+
+    def connect(self, name: str, ip: str = "127.0.0.1", port: int = 2424):
         """
-        add new peer to connected_addresses
-        :param host: ip of peer
+        add new peer to connected addresses
+        :param name: name of peer using for identify peer
+        :param ip: ip of peer
         :param port: port of peer
-        :param args:
-        :param kwargs:
         """
-        peer = (host, port)
-        self._connected_addresses.append(peer)
-        print(f"connected {self._connected_addresses}")
+        new_peer = [ip, port, name, "pubkey"]  # instead pubkey must be ciphering pubkey
+        if any([name == peer[2] for peer in self._connected_addresses]):
+            print(f"name {name} already connected")
+        elif any([(ip == peer[0] and port == peer[1]) for peer in self._connected_addresses]):
+            print(f"{ip}:{port} already connected")
+        else:
+            self._connected_addresses.append(new_peer)
+            print(f"connected {ip}:{port} as {name}")
 
-    def send_msg(self, msg: str, host: str, port: int, *args, **kwargs):
+    def send_msg(self, msg: str, peer_name: str):
         """
-        send msg to host with name
-        :param msg:
-        :param host:
-        :param port:
-        :param args:
-        :param kwargs:
+        send msg to peer with peer_name
+        :param msg: message to send
+        :param peer_name: name of peer
         :return None:
         """
-        peer = (host, port)
-        e_msg = vp.encrypt(msg)
-        self.sock_c.sendto(e_msg.encode("utf-8"), peer)
+        # msg = ["MESSAGE", msg, id: tuple = (ip, port)]
+        peer = self.get_peer_by_name(peer_name)
+        if peer:
+            peer_addr = tuple(peer[:2])
+            packet = Packet(packet_type="MESSAGE", payload=vp.encrypt(msg), port=self.sock_l_port)
+            encrypted_msg = pickle.dumps(packet)
+            self.sock_c.sendto(encrypted_msg, peer_addr)
+        else:
+            print("no such peer")
 
-    def disconnect(self, host: str, *args, **kwargs):
-        msg = vp.encrypt(f"peer {self.sock_l_ip}:{self.sock_l_port} abort the connection").encode("utf-8")
-        self.sock_c.sendto(msg, host)
-        self._connected_addresses = [(ip, port) for ip, port in self._connected_addresses if ip != host]
+    def disconnect(self, peer_name: str):
+        """
+        removes a peer with a peer_name from the connected addresses
+        :param peer_name: name of peer to disconnect
+        :return:
+        """
+        self._connected_addresses = [peer for peer in self._connected_addresses if peer[2] != peer_name]
 
-    def disconnect_all(self, *args, **kwargs):
-        # send disconnect message to every connected peer
-        for peer in self._connected_addresses:
-            msg = vp.encrypt(f"peer {self.sock_l_ip}:{self.sock_l_port} abort the connection").encode("utf-8")
-            self.sock_c.sendto(msg, (peer[0], peer[1]))
+    def disconnect_all(self):
+        """
+        disconnect all peers
+        :return:
+        """
         self._connected_addresses.clear()
 
+    def get_peer_by_name(self, peer_name: str, *args, **kwargs) -> tuple | None:
+        """
+        returns the first peer with the specified peer_name, else None
+        :param peer_name: name of peer for search
+        :return:
+        """
+        for peer in self._connected_addresses:
+            if peer[2] == peer_name:
+                return peer
+
+    def get_peer_by_addr(self, addr: tuple) -> tuple | None:
+        """
+        return the first peer with the specified ip, else None
+        :param addr: (ip: str, port: int)
+        :return:
+        """
+        ip, port = addr
+        for peer in self._connected_addresses:
+            if peer[0] == ip and peer[1] == port:
+                return peer
+
     @property
-    def connected_addresses(self):
+    def connected_addresses(self) -> list:
         return self._connected_addresses
