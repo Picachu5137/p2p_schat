@@ -3,13 +3,17 @@
 """
 
 
-def generate_keys():
-    pass
+def generate_keys(*args):
+    return None, None
 
 
-def encode():
-    pass
+def encrypt(msg, *args) -> str:
+    return msg
 
 
-def decode():
+def decrypt(enctrypted_msg, *args) -> str:
+    return enctrypted_msg
+
+
+if __name__ == "__main__":
     pass
